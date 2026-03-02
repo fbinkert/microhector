@@ -9,7 +9,7 @@ pub struct SimilarityResult {
 pub struct VectorDatabase<const DIM: usize>(Vec<(u64, [f32; DIM])>);
 
 impl<const DIM: usize> VectorDatabase<DIM> {
-    /// Insert a vecotr with an ID.
+    /// Insert a vector with an ID.
     pub fn insert(&mut self, id: u64, vector: [f32; DIM]) {
         self.0.push((id, vector));
     }
@@ -22,7 +22,7 @@ impl<const DIM: usize> VectorDatabase<DIM> {
             .iter()
             .map(|(id, vector)| SimilarityResult {
                 id: *id,
-                // Squared euclidean distance
+                // Squared Euclidean distance
                 distance: query.iter().zip(vector).map(|(a, b)| (a - b).powi(2)).sum(),
             })
             .collect();

@@ -1,6 +1,6 @@
 # Microhector
 
-An extremely minimal, in-memory vector database written in under 30 lines of Rust.
+A minimal, in-memory vector index written in under 30 lines of Rust.
 
 `microhector` is an educational project for demonstrating the core mechanics of vector search.
 

@@ -9,6 +9,9 @@ edition = "2024"
 criterion = { version = "0.8", features = ["html_reports"] }
 rand = "0.10"
 
+[profile.release]
+debug = true
+
 [[bench]]
 name = "vector_search"
 harness = false
