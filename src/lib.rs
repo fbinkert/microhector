@@ -1,5 +1,7 @@
 #![cfg_attr(feature = "portable-simd", feature(portable_simd))]
 
+pub mod simd;
+
 /// Represents a single search result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimilarityResult {

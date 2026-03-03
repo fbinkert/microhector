@@ -1,7 +1,7 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use microhector::{VectorDatabase, VectorDatabaseSoA};
+use microhector::{VectorDatabase, VectorDatabaseSoA, simd};
 use rand::RngExt;
 
 const DIM: usize = 128;
@@ -165,5 +165,58 @@ fn bench_brute_force_search(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_brute_force_search);
+fn bench_simd_kernels(c: &mut Criterion) {
+    let mut group = c.benchmark_group("simd_kernels");
+    group.sample_size(100);
+
+    const LEN: usize = 1024;
+    let mut rng = rand::rng();
+    let a: Vec<f32> = (0..LEN).map(|_| rng.random()).collect();
+    let b: Vec<f32> = (0..LEN).map(|_| rng.random()).collect();
+
+    group.bench_function("scalar_squared_euclidean", |b| {
+        b.iter(|| {
+            let sum = simd::squared_euclidean_scalar(black_box(&a), black_box(&b));
+            black_box(sum);
+        });
+    });
+
+    group.bench_function("auto_vec_squared_euclidean", |b| {
+        b.iter(|| {
+            let sum = simd::squared_euclidean_auto_vec(black_box(&a), black_box(&b));
+            black_box(sum);
+        });
+    });
+
+    #[cfg(target_arch = "aarch64")]
+    group.bench_function("neon_squared_euclidean", |b| {
+        b.iter(|| {
+            let sum = simd::squared_euclidean_neon(black_box(&a), black_box(&b))
+                .unwrap_or_else(|| simd::squared_euclidean_scalar(&a, &b));
+            black_box(sum);
+        });
+    });
+
+    #[cfg(target_arch = "x86_64")]
+    group.bench_function("sse_squared_euclidean", |b| {
+        b.iter(|| {
+            let sum = simd::squared_euclidean_sse(black_box(&a), black_box(&b))
+                .unwrap_or_else(|| simd::squared_euclidean_scalar(&a, &b));
+            black_box(sum);
+        });
+    });
+
+    #[cfg(target_arch = "x86_64")]
+    group.bench_function("avx_squared_euclidean", |b| {
+        b.iter(|| {
+            let sum = simd::squared_euclidean_avx(black_box(&a), black_box(&b))
+                .unwrap_or_else(|| simd::squared_euclidean_scalar(&a, &b));
+            black_box(sum);
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_brute_force_search, bench_simd_kernels);
 criterion_main!(benches);
