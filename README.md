@@ -6,6 +6,21 @@ A minimal, in-memory vector index written in under 30 lines of Rust.
 
 Currently, it implements a brute-force (exact match) Nearest Neighbor search using Euclidean distance.
 
+## Benchmarks
+
+Run the standard benchmarks:
+
+```bash
+cargo bench
+```
+
+Run the portable SIMD benchmarks on nightly:
+
+```bash
+rustup install nightly
+rustup run nightly cargo bench --features portable-simd
+```
+
 ## Quick Start
 
 To use `microhector`, simply initialize a database with your required dimensionality, insert your vectors, and query them.
