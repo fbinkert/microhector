@@ -1,6 +1,10 @@
 //! SIMD playground for kNN-relevant kernels.
 //!
 //! Keep these small and isolated so you can experiment without touching core code paths.
+#[cfg(target_arch = "x86_64")]
+use std::sync::OnceLock;
+#[cfg(target_arch = "x86_64")]
+type X86DistanceFn = unsafe fn(*const f32, *const f32, usize) -> f32;
 
 /// Scalar squared Euclidean distance (reference).
 pub fn squared_euclidean_scalar(a: &[f32], b: &[f32]) -> f32 {
@@ -95,12 +99,25 @@ unsafe fn squared_euclidean_neon_impl(a: *const f32, b: *const f32, len: usize) 
 /// Returns `None` if SSE is not available at runtime.
 #[cfg(target_arch = "x86_64")]
 pub fn squared_euclidean_sse(a: &[f32], b: &[f32]) -> Option<f32> {
-    if !is_x86_feature_detected!("sse") {
+    if !has_x86_sse() {
         return None;
     }
     debug_assert_eq!(a.len(), b.len());
     // SAFETY: guarded by runtime feature detection.
     Some(unsafe { squared_euclidean_sse_impl(a.as_ptr(), b.as_ptr(), a.len()) })
+}
+
+/// x86 runtime-dispatched squared Euclidean distance.
+///
+/// Prefers SSE over AVX on older Intel mobile CPUs where AVX can hurt
+/// mixed scalar/SIMD workloads due to frequency and transition effects.
+#[cfg(target_arch = "x86_64")]
+pub fn squared_euclidean_x86_simd(a: &[f32], b: &[f32]) -> Option<f32> {
+    debug_assert_eq!(a.len(), b.len());
+    x86_distance_fn().map(|f| {
+        // SAFETY: function pointer selected via runtime feature detection.
+        unsafe { f(a.as_ptr(), b.as_ptr(), a.len()) }
+    })
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -116,8 +133,8 @@ unsafe fn squared_euclidean_sse_impl(a: *const f32, b: *const f32, len: usize) -
     let mut i = 0usize;
     while i + 4 <= len {
         // Load 4 floats from a and b into SSE registers.
-        let va = _mm_loadu_ps(unsafe { a.add(i) });
-        let vb = _mm_loadu_ps(unsafe { b.add(i) });
+        let va = unsafe { _mm_loadu_ps(a.add(i)) };
+        let vb = unsafe { _mm_loadu_ps(b.add(i)) };
         // diff = va - vb (lane-wise)
         let diff = _mm_sub_ps(va, vb);
         // sq = diff * diff (lane-wise square)
@@ -128,10 +145,10 @@ unsafe fn squared_euclidean_sse_impl(a: *const f32, b: *const f32, len: usize) -
     }
 
     // Horizontal sum the 4 lanes into one scalar.
-    let mut acc = _mm_hadd_ps(acc, acc);
-    acc = _mm_hadd_ps(acc, acc);
+    let mut acc = unsafe { _mm_hadd_ps(acc, acc) };
+    acc = unsafe { _mm_hadd_ps(acc, acc) };
     let mut tmp = [0.0f32; 4];
-    _mm_storeu_ps(tmp.as_mut_ptr(), acc);
+    unsafe { _mm_storeu_ps(tmp.as_mut_ptr(), acc) };
     let mut sum = tmp[0];
 
     while i < len {
@@ -149,7 +166,7 @@ unsafe fn squared_euclidean_sse_impl(a: *const f32, b: *const f32, len: usize) -
 /// Returns `None` if AVX is not available at runtime.
 #[cfg(target_arch = "x86_64")]
 pub fn squared_euclidean_avx(a: &[f32], b: &[f32]) -> Option<f32> {
-    if !is_x86_feature_detected!("avx") {
+    if !has_x86_avx() {
         return None;
     }
     debug_assert_eq!(a.len(), b.len());
@@ -162,7 +179,7 @@ pub fn squared_euclidean_avx(a: &[f32], b: &[f32]) -> Option<f32> {
 unsafe fn squared_euclidean_avx_impl(a: *const f32, b: *const f32, len: usize) -> f32 {
     use std::arch::x86_64::{
         __m256, _mm256_add_ps, _mm256_hadd_ps, _mm256_loadu_ps, _mm256_mul_ps,
-        _mm256_setzero_ps, _mm256_storeu_ps, _mm256_sub_ps,
+        _mm256_setzero_ps, _mm256_storeu_ps, _mm256_sub_ps, _mm256_zeroupper,
     };
 
     // acc = [0,0,0,0,0,0,0,0] accumulator vector
@@ -170,8 +187,8 @@ unsafe fn squared_euclidean_avx_impl(a: *const f32, b: *const f32, len: usize) -
     let mut i = 0usize;
     while i + 8 <= len {
         // Load 8 floats from a and b into AVX registers.
-        let va = _mm256_loadu_ps(unsafe { a.add(i) });
-        let vb = _mm256_loadu_ps(unsafe { b.add(i) });
+        let va = unsafe { _mm256_loadu_ps(a.add(i)) };
+        let vb = unsafe { _mm256_loadu_ps(b.add(i)) };
         // diff = va - vb (lane-wise)
         let diff = _mm256_sub_ps(va, vb);
         // sq = diff * diff (lane-wise square)
@@ -185,7 +202,7 @@ unsafe fn squared_euclidean_avx_impl(a: *const f32, b: *const f32, len: usize) -
     let mut acc = _mm256_hadd_ps(acc, acc);
     acc = _mm256_hadd_ps(acc, acc);
     let mut tmp = [0.0f32; 8];
-    _mm256_storeu_ps(tmp.as_mut_ptr(), acc);
+    unsafe { _mm256_storeu_ps(tmp.as_mut_ptr(), acc) };
     let mut sum = tmp[0] + tmp[4];
 
     while i < len {
@@ -195,7 +212,39 @@ unsafe fn squared_euclidean_avx_impl(a: *const f32, b: *const f32, len: usize) -
         i += 1;
     }
 
+    // Avoid AVX->SSE transition penalties in mixed scalar/SIMD callers.
+    _mm256_zeroupper();
+
     sum
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn has_x86_sse() -> bool {
+    static HAS_SSE: OnceLock<bool> = OnceLock::new();
+    *HAS_SSE.get_or_init(|| is_x86_feature_detected!("sse"))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn has_x86_avx() -> bool {
+    static HAS_AVX: OnceLock<bool> = OnceLock::new();
+    *HAS_AVX.get_or_init(|| is_x86_feature_detected!("avx"))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn x86_distance_fn() -> Option<X86DistanceFn> {
+    static DIST_FN: OnceLock<Option<X86DistanceFn>> = OnceLock::new();
+    *DIST_FN.get_or_init(|| {
+        if has_x86_sse() {
+            return Some(squared_euclidean_sse_impl);
+        }
+        if has_x86_avx() {
+            return Some(squared_euclidean_avx_impl);
+        }
+        None
+    })
 }
 
 #[cfg(test)]

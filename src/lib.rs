@@ -456,27 +456,65 @@ fn squared_euclidean_ptr(a: *const f32, b: *const f32, len: usize) -> f32 {
 
 #[inline]
 fn squared_euclidean_simd_ptr(a: *const f32, b: *const f32, len: usize) -> f32 {
+    simd_distance_fn()(a, b, len)
+}
+
+#[inline]
+fn simd_distance_fn() -> fn(*const f32, *const f32, usize) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx") {
-            // SAFETY: guarded by runtime feature detection.
-            return unsafe { squared_euclidean_avx(a, b, len) };
-        }
-        if is_x86_feature_detected!("sse") {
-            // SAFETY: guarded by runtime feature detection.
-            return unsafe { squared_euclidean_sse(a, b, len) };
-        }
+        use std::sync::OnceLock;
+
+        static DIST_FN: OnceLock<fn(*const f32, *const f32, usize) -> f32> = OnceLock::new();
+        *DIST_FN.get_or_init(|| {
+            if is_x86_feature_detected!("sse") {
+                return squared_euclidean_sse_dispatch;
+            }
+            if is_x86_feature_detected!("avx") {
+                return squared_euclidean_avx_dispatch;
+            }
+            squared_euclidean_ptr
+        })
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        if std::arch::is_aarch64_feature_detected!("neon") {
-            // SAFETY: guarded by runtime feature detection.
-            return unsafe { squared_euclidean_neon(a, b, len) };
-        }
+        use std::sync::OnceLock;
+
+        static DIST_FN: OnceLock<fn(*const f32, *const f32, usize) -> f32> = OnceLock::new();
+        *DIST_FN.get_or_init(|| {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                return squared_euclidean_neon_dispatch;
+            }
+            squared_euclidean_ptr
+        })
     }
 
-    squared_euclidean_ptr(a, b, len)
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        squared_euclidean_ptr
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn squared_euclidean_avx_dispatch(a: *const f32, b: *const f32, len: usize) -> f32 {
+    // SAFETY: selected only when AVX is available.
+    unsafe { squared_euclidean_avx(a, b, len) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn squared_euclidean_sse_dispatch(a: *const f32, b: *const f32, len: usize) -> f32 {
+    // SAFETY: selected only when SSE is available.
+    unsafe { squared_euclidean_sse(a, b, len) }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn squared_euclidean_neon_dispatch(a: *const f32, b: *const f32, len: usize) -> f32 {
+    // SAFETY: selected only when NEON is available.
+    unsafe { squared_euclidean_neon(a, b, len) }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -484,32 +522,35 @@ fn squared_euclidean_simd_ptr(a: *const f32, b: *const f32, len: usize) -> f32 {
 unsafe fn squared_euclidean_avx(a: *const f32, b: *const f32, len: usize) -> f32 {
     use std::arch::x86_64::{
         __m256, _mm256_add_ps, _mm256_hadd_ps, _mm256_loadu_ps, _mm256_mul_ps,
-        _mm256_setzero_ps, _mm256_storeu_ps, _mm256_sub_ps,
+        _mm256_setzero_ps, _mm256_storeu_ps, _mm256_sub_ps, _mm256_zeroupper,
     };
 
-    let mut acc: __m256 = _mm256_setzero_ps();
+    let mut acc: __m256 = unsafe { _mm256_setzero_ps() };
     let mut i = 0usize;
     while i + 8 <= len {
-        let va = _mm256_loadu_ps(a.add(i));
-        let vb = _mm256_loadu_ps(b.add(i));
-        let diff = _mm256_sub_ps(va, vb);
-        let sq = _mm256_mul_ps(diff, diff);
-        acc = _mm256_add_ps(acc, sq);
+        let va = unsafe { _mm256_loadu_ps(a.add(i)) };
+        let vb = unsafe { _mm256_loadu_ps(b.add(i)) };
+        let diff = unsafe { _mm256_sub_ps(va, vb) };
+        let sq = unsafe { _mm256_mul_ps(diff, diff) };
+        acc = unsafe { _mm256_add_ps(acc, sq) };
         i += 8;
     }
 
     // Horizontal sum acc.
-    let mut acc = _mm256_hadd_ps(acc, acc);
-    acc = _mm256_hadd_ps(acc, acc);
+    let mut acc = unsafe { _mm256_hadd_ps(acc, acc) };
+    acc = unsafe { _mm256_hadd_ps(acc, acc) };
     let mut tmp = [0.0f32; 8];
-    _mm256_storeu_ps(tmp.as_mut_ptr(), acc);
+    unsafe { _mm256_storeu_ps(tmp.as_mut_ptr(), acc) };
     let mut sum = tmp[0] + tmp[4];
 
     while i < len {
-        let diff = *a.add(i) - *b.add(i);
+        let diff = unsafe { *a.add(i) - *b.add(i) };
         sum += diff * diff;
         i += 1;
     }
+
+    // Avoid AVX->SSE transition penalties in mixed scalar/SIMD callers.
+    unsafe { _mm256_zeroupper() };
 
     sum
 }
@@ -522,25 +563,25 @@ unsafe fn squared_euclidean_sse(a: *const f32, b: *const f32, len: usize) -> f32
         _mm_storeu_ps, _mm_sub_ps,
     };
 
-    let mut acc: __m128 = _mm_setzero_ps();
+    let mut acc: __m128 = unsafe { _mm_setzero_ps() };
     let mut i = 0usize;
     while i + 4 <= len {
-        let va = _mm_loadu_ps(a.add(i));
-        let vb = _mm_loadu_ps(b.add(i));
-        let diff = _mm_sub_ps(va, vb);
-        let sq = _mm_mul_ps(diff, diff);
-        acc = _mm_add_ps(acc, sq);
+        let va = unsafe { _mm_loadu_ps(a.add(i)) };
+        let vb = unsafe { _mm_loadu_ps(b.add(i)) };
+        let diff = unsafe { _mm_sub_ps(va, vb) };
+        let sq = unsafe { _mm_mul_ps(diff, diff) };
+        acc = unsafe { _mm_add_ps(acc, sq) };
         i += 4;
     }
 
-    let mut acc = _mm_hadd_ps(acc, acc);
-    acc = _mm_hadd_ps(acc, acc);
+    let mut acc = unsafe { _mm_hadd_ps(acc, acc) };
+    acc = unsafe { _mm_hadd_ps(acc, acc) };
     let mut tmp = [0.0f32; 4];
-    _mm_storeu_ps(tmp.as_mut_ptr(), acc);
+    unsafe { _mm_storeu_ps(tmp.as_mut_ptr(), acc) };
     let mut sum = tmp[0];
 
     while i < len {
-        let diff = *a.add(i) - *b.add(i);
+        let diff = unsafe { *a.add(i) - *b.add(i) };
         sum += diff * diff;
         i += 1;
     }
